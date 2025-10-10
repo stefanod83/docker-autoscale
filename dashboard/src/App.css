@@ -1,0 +1,134 @@
+body, html {
+  background: #f3f6f9;
+  margin: 0;
+  font-family: "Segoe UI", "Roboto", Arial, sans-serif;
+  color: #24304b;
+}
+
+.dashboard-title {
+  font-size: 2.2em;
+  margin-bottom: 1.2em;
+  font-weight: bold;
+  color: #1a365d;
+  border-left: 7px solid #3182ce;
+  padding-left: 17px;
+  letter-spacing: -0.5px;
+}
+
+.table-bg {
+  max-width: 98vw;
+  margin: 0 auto;
+  padding: 0 6px;
+}
+
+.table-wrap {
+  overflow-x: auto;
+  background: #fff;
+  border-radius: 16px;
+  box-shadow: 0 2px 15px #c5d7ee4d, 0 1.5px 2.5px #3f4c6b13;
+  padding: 8px 3px;
+}
+
+.modern-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 auto;
+  table-layout: auto;
+}
+
+.modern-table th {
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.15;
+  min-width: 70px;
+  padding: 7px 5px;
+}
+
+.modern-table td {
+  white-space: nowrap;
+  max-width: 390px;
+  padding: 7px 8px;
+  text-align: center;
+}
+
+.modern-table td.svc-name,
+.modern-table td.svc-id {
+  white-space: normal;
+  max-width: 600px;
+  text-overflow: initial;
+  overflow-x: visible;
+}
+
+.status-badge {
+  font-size: 0.94em;
+  font-weight: 600;
+  padding: 2px 10px;
+  border-radius: 7px;
+  margin: 0 auto;
+  min-width: 45px;
+  height: 22px;
+  line-height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.badge-running {
+  background: #e7f0f6;
+  color: #2561ad;
+}
+.badge-stopped {
+  background: #ffe6e6;
+  color: #b42020;
+}
+
+.filters-line {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+  flex-wrap: wrap;
+}
+.filter-input, .filter-select {
+  font-size: 1em;
+  padding: 5px 9px;
+  border-radius: 6px;
+  border: 1px solid #c5d5e2;
+  color: #234;
+  outline: none;
+}
+.filter-input { width: 110px; }
+.filter-select { min-width: 120px; }
+
+.meter-outer {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 215px;
+}
+
+.dashboard-footer {
+  margin: 40px 0 10px 0;
+  text-align: center;
+  color: #6c7895;
+  font-size: 0.93em;
+}
+
+.empty-state {
+  padding: 19px 7px;
+  color: #999;
+  font-size: 1.08em;
+  text-align: center;
+}
+
+@media (max-width: 600px) {
+  .dashboard-title {
+    font-size: 1.2em;
+  }
+  .modern-table th,
+  .modern-table td {
+    font-size: 0.9em;
+  }
+  .table-wrap {
+    padding: 3px;
+  }
+}
