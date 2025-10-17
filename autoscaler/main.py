@@ -1,6 +1,7 @@
-import os, asyncio, aiohttp, logging, json, socket, time, smtplib
+import os, asyncio, aiohttp, logging, json, socket, time, smtplib, sys
 import yaml
 from email.mime.text import MIMEText
+from aiohttp import web
 from utils import cpu_percent_v151, mem_percent, avg, parse_cpuset
 
 # -----------------------
@@ -21,12 +22,14 @@ DEFAULT_MIN = int(os.getenv("DEFAULT_MIN_REPLICAS","1"))
 DEFAULT_MAX = int(os.getenv("DEFAULT_MAX_REPLICAS","50"))
 
 SMTP_CONFIG_PATH = os.getenv("SMTP_CONFIG_PATH", "/config/smtp.yml")
+ADMIN_API_PORT = int(os.getenv("ADMIN_API_PORT", "9090"))
+STARTUP_PROXY_WAIT = int(os.getenv("STARTUP_PROXY_WAIT", "60"))  # secondi max di attesa proxy a startup
 
-# Stato runtime (globali del modulo)
-last_scale_ts = {}     # svc_id -> timestamp ultimo scale
-pending_down = {}      # svc_id -> asyncio.Task
-smtp_conf = {}         # config SMTP caricata
-notifier = None        # istanza EmailNotifier
+# Stato runtime
+last_scale_ts = {}
+pending_down = {}
+smtp_conf = {}
+notifier = None
 
 # -----------------------
 # Utilità HTTP/API
@@ -96,7 +99,7 @@ async def list_running_tasks(session, service_id):
     return await http_get_json(session, MANAGER_PROXY, "/tasks", params=params)
 
 async def container_stats_once(session, base, cid):
-    params = {"stream": "false"}  # niente one-shot: consente precpu_stats
+    params = {"stream": "false"}  # consente precpu_stats
     return await http_get_json(session, base, f"/containers/{cid}/stats", params=params)
 
 async def container_inspect(session, base, cid):
@@ -192,7 +195,7 @@ def normalize_cpu_percent(raw_pct: float, limit_cpus: float) -> float:
     return max(0.0, min(100.0, raw_pct / limit_cpus))
 
 # -----------------------
-# Email notifier con batching
+# Email notifier con batching + template error
 # -----------------------
 def load_smtp_config():
     try:
@@ -201,6 +204,19 @@ def load_smtp_config():
     except Exception as e:
         log.warning(f"SMTP config not loaded: {e}")
         return {}
+
+def log_smtp_config_debug(conf: dict):
+    if not log.isEnabledFor(logging.DEBUG):
+        return
+    smtp = conf.get("smtp", {}) or {}
+    pwd = smtp.get("password") or ""
+    masked = f"<len:{len(pwd)}>"
+    log.debug(
+        "SMTP cfg host=%s port=%s starttls=%s user=%s from=%s to_default=%s password=%s",
+        smtp.get("host"), smtp.get("port"), smtp.get("starttls"),
+        smtp.get("username"), conf.get("from"), conf.get("to_default"),
+        masked
+    )
 
 class EmailNotifier:
     def __init__(self, conf: dict):
@@ -224,7 +240,7 @@ class EmailNotifier:
             return
         msg = MIMEText(body, "plain", "utf-8")
         prefix = self.conf.get("subject_prefix","[Swarm Autoscaler]")
-        msg["Subject"] = f"{prefix} Autoscaling events"
+        msg["Subject"] = f"{prefix} {subject}"
         msg["From"] = from_addr
         msg["To"] = ", ".join(to_list)
         with smtplib.SMTP(host, port, timeout=20) as s:
@@ -240,6 +256,34 @@ class EmailNotifier:
             log.info(f"email sent to {to_list}")
         except Exception as e:
             log.error(f"email send failed: {e}")
+
+    # Template per batch eventi (scale up/down)
+    def _compose_events_body(self, items: list[dict]) -> str:
+        lines = []
+        for ev in items:
+            lines.append(
+                f"{ev['ts_iso']} | {ev['action']} | {ev['service']} ({ev['service_id']}) "
+                f"{ev['old']} -> {ev['new']} | cpu={ev['cpu']:.1f}% mem={ev['mem']:.1f}% | reason={ev['reason']}"
+            )
+        return "\n".join(lines)
+
+    # Template per errori (singoli, immediati)
+    def _compose_error_body(self, err: dict) -> str:
+        parts = [
+            f"Time: {err.get('ts_iso')}",
+            f"Service: {err.get('service')} ({err.get('service_id')})",
+            f"Action: {err.get('action')}",
+            f"Reason: {err.get('reason')}",
+        ]
+        det = err.get("details")
+        if det:
+            parts.append(f"Details:\n{det}")
+        return "\n".join(parts)
+
+    async def send_error_now(self, err: dict, to_list: list):
+        subject = f"ERROR: {err.get('service')} - {err.get('action')}"
+        body = self._compose_error_body(err)
+        await self.send_email(subject, body, to_list)
 
     async def flush_if_due(self, force=False):
         async with self.lock:
@@ -259,13 +303,7 @@ class EmailNotifier:
             for key, b in buckets.items():
                 if not b["rcpts"]:
                     continue
-                lines = []
-                for ev in b["items"]:
-                    lines.append(
-                        f"{ev['ts_iso']} | {ev['action']} | {ev['service']} ({ev['service_id']}) "
-                        f"{ev['old']} -> {ev['new']} | cpu={ev['cpu']:.1f}% mem={ev['mem']:.1f}% | reason={ev['reason']}"
-                    )
-                body = "\n".join(lines)
+                body = self._compose_events_body(b["items"])
                 await self.send_email("Autoscaling events", body, b["rcpts"])
             self.queue.clear()
             self.next_flush = now + float(self.conf.get("batch_window_seconds", 300) or 0)
@@ -279,13 +317,13 @@ class EmailNotifier:
                 log.error(f"flush loop error: {e}")
             await asyncio.sleep(2)
 
-    async def enqueue(self, ev: dict):
+    async def enqueue(self, ev: dict, urgent: bool = False):
         if not self.enabled:
             return
         async with self.lock:
             self.queue.append(ev)
-            if len(self.queue) >= self.max_batch:
-                self.next_flush = 0  # trigger flush
+            if urgent or len(self.queue) >= self.max_batch:
+                self.next_flush = 0  # flush asap
 
 def email_enabled_for_service(labels: dict, default=True):
     raw = labels.get(f"{LABEL_PREFIX}.notify.email.enable")
@@ -301,6 +339,43 @@ def recipients_for_service(labels: dict, conf: dict):
 
 def iso_now():
     return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+
+# -----------------------
+# Admin API (test email)
+# -----------------------
+async def handle_test_email(request: web.Request):
+    n: EmailNotifier = request.app["notifier"]
+    if not n or not n.enabled:
+        return web.json_response({"ok": False, "error": "email notifier disabled"}, status=400)
+    try:
+        if request.method == "POST":
+            payload = await request.json()
+        else:
+            payload = dict(request.query)
+        to_raw = payload.get("to")
+        subject = payload.get("subject", "Test email from autoscaler")
+        body = payload.get("body", "This is a test email.")
+        to_list = [e.strip() for e in to_raw.split(",")] if to_raw else (n.conf.get("to_default") or [])
+        if not to_list:
+            return web.json_response({"ok": False, "error": "no recipients"}, status=400)
+        await n.send_email(subject, body, to_list)
+        return web.json_response({"ok": True, "to": to_list})
+    except Exception as e:
+        return web.json_response({"ok": False, "error": str(e)}, status=500)
+
+async def start_admin_api(app_notifier: EmailNotifier, port: int):
+    app = web.Application()
+    app["notifier"] = app_notifier
+    app.router.add_get("/api/test-email", handle_test_email)
+    app.router.add_post("/api/test-email", handle_test_email)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    log.info(f"Admin API listening on :{port}")
+    # mantieni vivo
+    while True:
+        await asyncio.sleep(3600)
 
 # -----------------------
 # Scale-down “graceful”
@@ -344,7 +419,6 @@ async def graceful_scale_down(session, node_map, service_id, spec, name, labels,
         new_repl = max(cur - 1, 0)
         await update_service_replicas(session, service_id, new_repl)
 
-        # notifica email
         if notifier and email_enabled_for_service(labels, default=bool(smtp_conf.get("enabled", False))):
             to = recipients_for_service(labels, smtp_conf)
             ev = {
@@ -359,6 +433,17 @@ async def graceful_scale_down(session, node_map, service_id, spec, name, labels,
 
     except Exception as e:
         log.error(f"{service_id} graceful scale-down failed: {e}")
+        # invia email immediata in caso di errore (se possibile)
+        if notifier and email_enabled_for_service(labels, default=bool(smtp_conf.get("enabled", False))):
+            to = recipients_for_service(labels, smtp_conf)
+            err = {
+                "ts_iso": iso_now(),
+                "service": name, "service_id": service_id,
+                "action": "graceful_scale_down",
+                "reason": "Failure during graceful downscale",
+                "details": str(e),
+            }
+            await notifier.send_error_now(err, to)
     finally:
         pending = pending_down.pop(service_id, None)
         if pending and not pending.cancelled():
@@ -381,7 +466,6 @@ async def reconcile_service(session, node_map, svc):
     max_rep = read_label(labels, "max", DEFAULT_MAX, int)
     cooldown = read_label(labels, "cooldown", DEFAULT_COOLDOWN, int)
 
-    # Nuove label: controllo scale down e pre-stop
     scale_down_enabled = read_label(labels, "scale_down.enable", True, lambda v: str(v).lower() != "false")
     pre_cmd = read_label(labels, "pre_stop.cmd", "", str)
     pre_timeout = read_label(labels, "pre_stop.timeout", 600, int)
@@ -424,7 +508,8 @@ async def reconcile_service(session, node_map, svc):
 
     avg_cpu = avg(cpu_vals)
     avg_mem = avg(mem_vals)
-    log.info(f"{name} cpu={avg_cpu:.1f}% mem={avg_mem:.1f}% desired={desired} running={len(tasks)}")
+    # Passato a DEBUG
+    log.debug(f"{name} cpu={avg_cpu:.1f}% mem={avg_mem:.1f}% desired={desired} running={len(tasks)}")
 
     now = time.time()
     last = last_scale_ts.get(svc_id, 0)
@@ -438,20 +523,32 @@ async def reconcile_service(session, node_map, svc):
     if can_scale and need_up and desired < max_rep:
         new_replicas = min(desired + 1, max_rep)
         if new_replicas != desired:
-            await update_service_replicas(session, svc_id, new_replicas)
-            last_scale_ts[svc_id] = now
-            # email
-            if notifier and email_enabled_for_service(labels, default=bool(smtp_conf.get("enabled", False))):
-                to = recipients_for_service(labels, smtp_conf)
-                ev = {
-                    "ts_iso": iso_now(),
-                    "service": name, "service_id": svc_id,
-                    "action": "scale_up", "old": desired, "new": new_replicas,
-                    "cpu": avg_cpu, "mem": avg_mem,
-                    "reason": f"cpu>{cpu_max} or mem>{mem_max}",
-                    "to": to
-                }
-                await notifier.enqueue(ev)
+            try:
+                await update_service_replicas(session, svc_id, new_replicas)
+                last_scale_ts[svc_id] = now
+                if notifier and email_enabled_for_service(labels, default=bool(smtp_conf.get("enabled", False))):
+                    to = recipients_for_service(labels, smtp_conf)
+                    ev = {
+                        "ts_iso": iso_now(),
+                        "service": name, "service_id": svc_id,
+                        "action": "scale_up", "old": desired, "new": new_replicas,
+                        "cpu": avg_cpu, "mem": avg_mem,
+                        "reason": f"cpu>{cpu_max} or mem>{mem_max}",
+                        "to": to
+                    }
+                    await notifier.enqueue(ev)
+            except Exception as e:
+                log.error(f"{name} scale up failed: {e}")
+                if notifier and email_enabled_for_service(labels, default=bool(smtp_conf.get("enabled", False))):
+                    to = recipients_for_service(labels, smtp_conf)
+                    err = {
+                        "ts_iso": iso_now(),
+                        "service": name, "service_id": svc_id,
+                        "action": "scale_up",
+                        "reason": "Failure during upscaling",
+                        "details": str(e),
+                    }
+                    await notifier.send_error_now(err, to)
             return
 
     # Scale DOWN
@@ -461,7 +558,7 @@ async def reconcile_service(session, node_map, svc):
             return
         if pre_cmd:
             log.info(f"{name} scheduling graceful scale-down")
-            last_scale_ts[svc_id] = now  # blocca altre azioni durante il drain
+            last_scale_ts[svc_id] = now
             pending_down[svc_id] = asyncio.create_task(
                 graceful_scale_down(session, node_map, svc_id, spec, name, labels, tasks,
                                     pre_cmd, pre_timeout, stop_timeout)
@@ -470,21 +567,61 @@ async def reconcile_service(session, node_map, svc):
         else:
             new_replicas = max(desired - 1, min_rep)
             if new_replicas != desired:
-                await update_service_replicas(session, svc_id, new_replicas)
-                last_scale_ts[svc_id] = now
-                # email
-                if notifier and email_enabled_for_service(labels, default=bool(smtp_conf.get("enabled", False))):
-                    to = recipients_for_service(labels, smtp_conf)
-                    ev = {
-                        "ts_iso": iso_now(),
-                        "service": name, "service_id": svc_id,
-                        "action": "scale_down", "old": desired, "new": new_replicas,
-                        "cpu": avg_cpu, "mem": avg_mem,
-                        "reason": f"cpu<{cpu_min} and mem<{mem_min}",
-                        "to": to
-                    }
-                    await notifier.enqueue(ev)
+                try:
+                    await update_service_replicas(session, svc_id, new_replicas)
+                    last_scale_ts[svc_id] = now
+                    if notifier and email_enabled_for_service(labels, default=bool(smtp_conf.get("enabled", False))):
+                        to = recipients_for_service(labels, smtp_conf)
+                        ev = {
+                            "ts_iso": iso_now(),
+                            "service": name, "service_id": svc_id,
+                            "action": "scale_down", "old": desired, "new": new_replicas,
+                            "cpu": avg_cpu, "mem": avg_mem,
+                            "reason": f"cpu<{cpu_min} and mem<{mem_min}",
+                            "to": to
+                        }
+                        await notifier.enqueue(ev)
+                except Exception as e:
+                    log.error(f"{name} scale down failed: {e}")
+                    if notifier and email_enabled_for_service(labels, default=bool(smtp_conf.get("enabled", False))):
+                        to = recipients_for_service(labels, smtp_conf)
+                        err = {
+                            "ts_iso": iso_now(),
+                            "service": name, "service_id": svc_id,
+                            "action": "scale_down",
+                            "reason": "Failure during downscaling",
+                            "details": str(e),
+                        }
+                        await notifier.send_error_now(err, to)
                 return
+
+# -----------------------
+# Startup: attesa proxy pronti
+# -----------------------
+async def wait_proxies_ready(session, max_wait_seconds: int) -> bool:
+    deadline = time.time() + max_wait_seconds
+    while time.time() < deadline:
+        ok_mgr = False
+        ok_ro = False
+        # manager /_ping
+        try:
+            pong = await http_get_json(session, MANAGER_PROXY, "/_ping", params=None, timeout=3)
+            if (isinstance(pong, str) and pong.strip().upper() == "OK") or pong:
+                ok_mgr = True
+        except Exception:
+            ok_mgr = False
+        # almeno un RO /info mappato
+        try:
+            ro_bases = resolve_ro_proxies()
+            node_map = await build_nodeid_to_proxy(session, ro_bases)
+            ok_ro = len(node_map) > 0
+        except Exception:
+            ok_ro = False
+        if ok_mgr and ok_ro:
+            log.info("Proxies ready: manager and read-only endpoints reachable")
+            return True
+        await asyncio.sleep(2)
+    return False
 
 # -----------------------
 # Main loop
@@ -492,10 +629,32 @@ async def reconcile_service(session, node_map, svc):
 async def main_loop():
     global smtp_conf, notifier
     smtp_conf = load_smtp_config()
+    log_smtp_config_debug(smtp_conf)
     notifier = EmailNotifier(smtp_conf)
     asyncio.create_task(notifier.run_flush_loop())
+    asyncio.create_task(start_admin_api(notifier, ADMIN_API_PORT))
 
     async with aiohttp.ClientSession() as session:
+        # Attesa iniziale dei proxy (per evitare falsi errori a bootstrap)
+        ready = await wait_proxies_ready(session, STARTUP_PROXY_WAIT)
+        if not ready:
+            msg = f"Startup failed: proxies not reachable within {STARTUP_PROXY_WAIT}s"
+            log.error(msg)
+            # Email d'errore dedicata (immediata)
+            if smtp_conf.get("enabled"):
+                to = smtp_conf.get("to_default") or []
+                if to:
+                    err = {
+                        "ts_iso": iso_now(),
+                        "service": "autoscaler", "service_id": "autoscaler",
+                        "action": "startup",
+                        "reason": "Proxies not reachable on startup",
+                        "details": msg,
+                    }
+                    await notifier.send_error_now(err, to)
+            # termina con errore
+            sys.exit(1)
+
         while True:
             try:
                 ro_bases = resolve_ro_proxies()
@@ -506,6 +665,17 @@ async def main_loop():
                 await notifier.flush_if_due()
             except Exception as e:
                 log.error(f"reconcile error: {e}")
+                if smtp_conf.get("enabled"):
+                    to = smtp_conf.get("to_default") or []
+                    if to:
+                        err = {
+                            "ts_iso": iso_now(),
+                            "service": "autoscaler", "service_id": "autoscaler",
+                            "action": "reconcile",
+                            "reason": "Unhandled error during reconcile loop",
+                            "details": str(e),
+                        }
+                        await notifier.send_error_now(err, to)
             await asyncio.sleep(POLL_INTERVAL)
 
 if __name__ == "__main__":

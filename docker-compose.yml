@@ -5,7 +5,7 @@ services:
   dsproxy_ro:
     image: tecnativa/docker-socket-proxy:latest
     networks:
-      - dockerapi
+      - internal
     deploy:
       mode: global
       endpoint_mode: dnsrr
@@ -42,7 +42,7 @@ services:
   dsproxy_rw:
     image: tecnativa/docker-socket-proxy:latest
     networks:
-      - dockerapi
+      - internal
     deploy:
       mode: replicated
       replicas: 1
@@ -73,11 +73,16 @@ services:
       - /run
       - /tmp
       - /usr/local/etc/haproxy
+    depends_on:
+      - dsproxy_ro
 
   autoscaler:
     image: registry.devarch.local:443/devarch-it/docker-autoscaler:v0.6
     networks:
-      - dockerapi
+      - internal
+      - egress
+    expose:
+      - 9090
     environment:
       # DNS RR di tutte le istanze globali del proxy RO
       READONLY_PROXY_DNS: "tasks.dsproxy_ro"
@@ -91,6 +96,8 @@ services:
       # Boundaries di sicurezza (fallback se mancanti sui servizi)
       DEFAULT_MIN_REPLICAS: "1"
       DEFAULT_MAX_REPLICAS: "50"
+      # attesa iniziale (secondi) dei proxy
+      STARTUP_PROXY_WAIT: "60"
     secrets:
       - source: autoscaler-smtp
         target: /config/smtp.yml
@@ -104,11 +111,13 @@ services:
           - node.labels.manager == 00
       restart_policy:
         condition: any
+    depends_on:
+      - dsproxy_rw
 
   dashboard:
     image: registry.devarch.local:443/devarch-it/docker-autoscaler-dash:v0.2
     networks:
-      - dockerapi
+      - internal
       - traefik-net
     environment:
       DOCKER_API_URL: "http://dsproxy_rw:2375"
@@ -130,6 +139,8 @@ services:
           - node.platform.os == linux
           - node.role == manager
           - node.labels.manager == 00
+    depends_on:
+      - autoscaler
 
 configs:
   autoscaler-haproxy:
@@ -140,8 +151,10 @@ secrets:
     external: true
 
 networks:
-  dockerapi:
+  internal:
     driver: overlay
     attachable: true
   traefik-net:
+    external: true
+  egress:
     external: true
