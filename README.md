@@ -3,7 +3,7 @@
 Autoscaler e Dashboard per Docker Swarm basati su Docker Engine API, con socket proxy a permessi minimi, autoscaling guidato da label, normalizzazione CPU per core allocati, scale‑down “graceful” con pre‑stop, notifiche email con batching, admin API di test e integrazione Traefik.[^8][^10]
 Il design separa proxy read‑only globali per metriche e proxy manager‑only per update, mantenendo il principio del minimo privilegio e la compatibilità con manager/worker eterogenei.[^11][^8]
 
-![UX Table v3.1.png]("screen/UX Table v3.1.png")
+![UX Table v3.1.png](dashboard/screen/UX Table v3.1.png)
 
 ### Caratteristiche
 
