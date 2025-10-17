@@ -35,8 +35,12 @@ networks:
     attachable: true
 
 configs:
+  autoscaler-haproxy:
+    file: ./config/autoscaler-haproxy.yml
+
+configs:
   autoscaler-smtp:
-    file: ./config/smtp.yml
+    file: ./config/autoscaler-smtp.yml
 
 services:
   dsproxy_ro:
@@ -62,6 +66,10 @@ services:
       LOG_LEVEL: "info"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    configs:
+      - source: autoscaler-haproxy
+        target: /usr/local/etc/haproxy/haproxy.cfg.template
+        mode: 0444
     read_only: true
     tmpfs:
       - /usr/local/etc/haproxy
@@ -90,6 +98,10 @@ services:
       LOG_LEVEL: "info"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
+    configs:
+      - source: autoscaler-haproxy
+        target: /usr/local/etc/haproxy/haproxy.cfg.template
+        mode: 0444
     read_only: true
     tmpfs:
       - /usr/local/etc/haproxy
