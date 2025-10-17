@@ -1,0 +1,14 @@
+    deploy:
+      labels:
+        - autoscale.enable: true
+        - autoscale.cpu.max: 85
+        - autoscale.cpu.min: 25"
+        - autoscale.mem.max: 80"
+        - autoscale.mem.min: 15"
+        - autoscale.min: 1"
+        - autoscale.max: 4"
+        - autoscale.cooldown: 120"
+        - autoscale.scale_down.enable: true             # [true|false] per abilitare/disabilitare lo scale down per servizio (def. true)
+        - autoscale.pre_stop.cmd:                       # [sh -c 'your_command'] per eseguire un comando nel container scelto per lo scale down
+        - autoscale.pre_stop.timeout: 600               # timeout del comando in secondi (def. 600). In caso di timeout o ExitCode!=0, lo scale down viene abortito e si logga l’errore
+        - autoscale.stop.timeout: 30                    # timeout per lo stop del container via API al termine dell'esecuzione del comando o del pre_stop.timeout (def. 30)

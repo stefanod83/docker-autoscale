@@ -1,0 +1,4 @@
+window.__APP_CONFIG__ = {
+  SWARMPIT_URL: "https://swarm-dkrdev.devarch.local/api",
+  SWARMPIT_TOKEN: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzd2FybXBpdC1hcGkiLCJleHAiOm51bGwsImlhdCI6MTc2MDAwMzI1MSwidXNyIjp7InVzZXJuYW1lIjoic3lzYWRtaW4iLCJlbWFpbCI6InNlcnZpemktaXRAZGV2YXJjaHNvZnQuaXQiLCJyb2xlIjoiYWRtaW4ifSwianRpIjoiNTMzY2Y1MmYtODRmOS00NTVhLWEzMGEtYTUzMGQ2MTZlNzNlIn0.7XCcqFX6WJOa8fzCZBzYFRwTrqbMecLiKqMYUkN_N8E"
+};
