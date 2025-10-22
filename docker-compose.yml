@@ -12,6 +12,10 @@ services:
       placement:
         constraints:
           - node.platform.os == linux
+      restart_policy:
+        condition: "${DEPLOY_RESTART_POLICY:-any}"
+      update_config:
+        order: "${DEPLOY_UPDATE_ORDER:-start-first}"
     environment:
       # Sezioni per sola lettura necessarie
       CONTAINERS: "1"
@@ -50,6 +54,10 @@ services:
         constraints:
           - node.role == manager
           - node.labels.manager == 00
+      restart_policy:
+        condition: "${DEPLOY_RESTART_POLICY:-any}"
+      update_config:
+        order: "${DEPLOY_UPDATE_ORDER:-start-first}"
     environment:
       CONTAINERS: 1
       SERVICES: "1"    # Necessario per GET/POST servizi
@@ -97,7 +105,7 @@ services:
       DEFAULT_MIN_REPLICAS: "1"
       DEFAULT_MAX_REPLICAS: "50"
       # attesa iniziale (secondi) dei proxy
-      STARTUP_PROXY_WAIT: "60"
+      STARTUP_PROXY_WAIT: "20"
     secrets:
       - source: autoscaler-smtp
         target: /config/smtp.yml
@@ -110,37 +118,91 @@ services:
           - node.role == manager
           - node.labels.manager == 00
       restart_policy:
-        condition: any
+        condition: "${DEPLOY_RESTART_POLICY:-any}"
+      update_config:
+        order: "${DEPLOY_UPDATE_ORDER:-start-first}"
     depends_on:
       - dsproxy_rw
-
-  dashboard:
-    image: registry.devarch.local:443/devarch-it/docker-autoscaler-dash:v0.2
+  
+  dashboards:
+    image: registry.devarch.local:443/devarch-it/docker-swarm-monitor:v0.1
     networks:
       - internal
       - traefik-net
     environment:
-      DOCKER_API_URL: "http://dsproxy_rw:2375"
+      # Endpoint manager per API Swarm (solo lettura tramite socket-proxy RW)
+      MANAGER_API_URL: "http://dsproxy_rw:2375"
+      DOCKER_API_URL: "http://dsproxy_ro:2375"
+      # Versione API desiderata (sarà negoziata con /version se necessario)
       DOCKER_API_VERSION: "v1.49"
-      LOG_LEVEL: "${DASHBOARD_LOG_LEVEL_:-info}"
+      # Endpoint RO per-nodo (DNSRR) per stats/health dal demone locale
+      READONLY_PROXY_DNS: "dsproxy_ro"
+      READONLY_PROXY_PORT: "2375"
+      # Intervallo campionamento metriche lato server (secondi)
+      STATS_INTERVAL: "5"
+      LOG_LEVEL: "${DASHBOARD_LOG_LEVEL:-info}"
     expose:
       - "8080"
     deploy:
       labels:
-        traefik.http.services.autoscaler.loadbalancer.passHostHeader: 'true'
-        traefik.http.routers.autoscaler.rule: Host(`autoscaler-dkrdev.devarch.local`)
-        traefik.http.services.autoscaler.loadbalancer.server.port: '8080'
-        traefik.http.routers.autoscaler.entrypoints: https
-        traefik.http.routers.autoscaler.tls: 'true'
-        traefik.enable: 'true'
+        - "traefik.enable=true"
+        
+        # Middlewares per default redirect
+        # Router per la dashboard Swarm: https://dashboard-dkrdev.devarch.local
+        - "traefik.http.routers.dash-root.rule=Host(`dashboard-dkrdev.devarch.local`) && !(PathPrefix(`/swarm`) || PathPrefix(`/autoscaler`))"
+        - "traefik.http.routers.dash-root.entrypoints=https"
+        - "traefik.http.routers.dash-root.tls=true"
+        - "traefik.http.routers.dash-root.middlewares=dashboard-to-swarm"
+        - 'traefik.http.middlewares.dashboard-to-swarm.redirectregex.regex=^https?://([^/]+)/(?:$$|\?)'
+        - 'traefik.http.middlewares.dashboard-to-swarm.redirectregex.replacement=https://$$1/swarm'
+        - "traefik.http.middlewares.dashboard-to-swarm.redirectregex.permanent=true"
+       # - 'traefik.http.middlewares.dashboard-to-swarm.redirectregex.regex=^/$$'
+       # - 'traefik.http.middlewares.dashboard-to-swarm.redirectregex.replacement=/swarm'
+        - "traefik.http.middlewares.dashboard-to-swarm.redirectregex.permanent=true"
+        
+        # Router per la dashboard Swarm: https://dashboard-dkrdev.devarch.local/swarm
+        - "traefik.http.routers.dash-swarm.rule=Host(`dashboard-dkrdev.devarch.local`) && PathPrefix(`/swarm`)"
+        - "traefik.http.routers.dash-swarm.priority=100"
+        - "traefik.http.routers.dash-swarm.entrypoints=https"
+        - "traefik.http.routers.dash-swarm.tls=true"
+        - "traefik.http.routers.dash-swarm.service=dash-svc"
+        - "traefik.http.routers.dash-swarm.middlewares=internalnet@file"
+
+        # Router per la dashboard Autoscaler: https://dashboard-dkrdev.devarch.local/autoscaler
+        - "traefik.http.routers.dash-autoscale.rule=Host(`dashboard-dkrdev.devarch.local`) && PathPrefix(`/autoscaler`)"
+        - "traefik.http.routers.dash-autoscale.priority=100"
+        - "traefik.http.routers.dash-autoscale.entrypoints=https"
+        - "traefik.http.routers.dash-autoscale.tls=true"
+        - "traefik.http.routers.dash-autoscale.service=dash-svc"
+        - "traefik.http.routers.dash-autoscale.middlewares=internalnet@file"
+
+        # Service condiviso (stesso container per entrambi i router)
+        - "traefik.http.services.dash-svc.loadbalancer.server.port=8080"
+        - "traefik.http.services.dash-svc.loadbalancer.passHostHeader=true"
+        # Ottimizzazione streaming SSE
+        - "traefik.http.services.dash-svc.loadbalancer.responseforwarding.flushinterval=100ms"
+
+        # (Opzionale) Timeout più generosi per connessioni lunghe via ServersTransport
+        # - "traefik.http.routers.dash-swarm.transport=dash-transport"
+        # - "traefik.http.routers.dash-autoscale.transport=dash-transport"
+        # - "traefik.http.serverstransports.dash-transport.forwardingtimeouts.dialtimeout=30s"
+        # - "traefik.http.serverstransports.dash-transport.forwardingtimeouts.responseheadertimeout=120s"
+        # - "traefik.http.serverstransports.dash-transport.maxidleconnsperhost=64"
+      mode: replicated
       replicas: 1
       placement:
         constraints:
           - node.platform.os == linux
           - node.role == manager
           - node.labels.manager == 00
+      restart_policy:
+        condition: "${DEPLOY_RESTART_POLICY:-any}"
+      update_config:
+        order: "${DEPLOY_UPDATE_ORDER:-start-first}"
     depends_on:
       - autoscaler
+      - dsproxy_rw
+      - dsproxy_ro
 
 configs:
   autoscaler-haproxy:

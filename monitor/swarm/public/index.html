@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="it">
+  <head>
+    <meta charset="utf-8" />
+    <link rel="icon" href="./favicon.ico" sizes="any"> <link rel="icon" type="image/svg+xml" href="./favicon.svg"> <link rel="apple-touch-icon" href="./apple-touch-icon.png">
+    <title>Swarm Dashboard</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link href="./styles.css" rel="stylesheet" />
+    <script src="./runtime-config.js"></script>
+  </head>
+  <body>
+    <header class="hdr">
+      <div class="docker">docker</div>
+      <div class="clock" id="clock"></div>
+      <div class="actions">
+        <label class="lbl">Stack:</label>
+        <select id="stack-filter" class="sel"><option value="__all__">Tutti</option></select>
+        <a class="btn" href="/autoscaler" rel="noreferrer">Autoscaler</a>
+      </div>
+    </header>
+
+    <section id="matrix-header" class="matrix header" aria-label="Intestazione nodi"></section>
+    <main id="matrix-body" class="matrix body" aria-label="Servizi e task"></main>
+
+    <footer class="ftr">
+      <span id="status">Avvio…</span>
+      <span id="stream-indicator" style="margin-left:8px;color:#9cb6ca"></span>
+    </footer>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

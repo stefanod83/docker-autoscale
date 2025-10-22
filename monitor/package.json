@@ -1,0 +1,28 @@
+{
+  "name": "unified-dashboards",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Unified Swarm + Autoscaler dashboards on one Express server",
+  "main": "server.js",
+  "type": "module",
+  "scripts": {
+    "build:autoscaler": "esbuild autoscaler/src/index.js --bundle --format=esm --outfile=autoscaler/public/assets/app.js --loader:.js=jsx --loader:.css=css --sourcemap=inline",
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "compression": "^1.7.4",
+    "express": "^4.19.2",
+    "morgan": "^1.10.0",
+    "pino": "^9.3.0",
+    "pino-http": "^10.1.0",
+
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "@mui/material": "^5.15.20",
+    "@emotion/react": "^11.13.3",
+    "@emotion/styled": "^11.13.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.23.0"
+  }
+}
